@@ -16,6 +16,7 @@ namespace NAudio.Wave
         private readonly bool ownInput;
         private readonly long dataPosition;
         private readonly int dataChunkLength;
+        private readonly bool pcmLittleEndian;
         private readonly List<AiffChunk> chunks = new List<AiffChunk>();
         private Stream waveStream;
         private readonly object lockObject = new object();
@@ -38,7 +39,7 @@ namespace NAudio.Wave
         public AiffFileReader(Stream inputStream)
         {
             waveStream = inputStream;
-            ReadAiffHeader(waveStream, out waveFormat, out dataPosition, out dataChunkLength, chunks);
+            ReadAiffHeader(waveStream, out waveFormat, out dataPosition, out dataChunkLength, chunks, out pcmLittleEndian);
             Position = 0;
         }
 
@@ -50,12 +51,14 @@ namespace NAudio.Wave
         /// <param name="dataChunkPosition">The position of the data chunk</param>
         /// <param name="dataChunkLength">The length of the data chunk</param>
         /// <param name="chunks">Additional chunks found</param>
-        public static void ReadAiffHeader(Stream stream, out WaveFormat format, out long dataChunkPosition, out int dataChunkLength, List<AiffChunk> chunks)
+        /// <param name="pcmLittleEndian">True if PCM is little endian (AIFC with sowt compress</param>
+        public static void ReadAiffHeader(Stream stream, out WaveFormat format, out long dataChunkPosition, out int dataChunkLength, List<AiffChunk> chunks, out bool pcmLittleEndian)
         {
             dataChunkPosition = -1;
             format = null;
+            pcmLittleEndian = false;
             BinaryReader br = new BinaryReader(stream);
-            
+
             if (ReadChunkName(br) != "FORM")
             {
                 throw new FormatException("Not an AIFF file - no FORM header.");
@@ -88,10 +91,11 @@ namespace NAudio.Wave
                     format = new WaveFormat((int)sampleRate, (int)sampleSize, (int)numChannels);
 
                     if (nextChunk.ChunkLength > 18 && formType == "AIFC")
-                    {   
+                    {
                         // In an AIFC file, the compression format is tacked on to the COMM chunk
                         string compress = new string(br.ReadChars(4)).ToLower();
-                        if (compress != "none") throw new FormatException("Compressed AIFC is not supported.");
+                        if (compress != "none" && compress != "sowt") throw new FormatException("Compressed AIFC is not supported.");
+                        pcmLittleEndian = compress == "sowt";
                         br.ReadBytes((int)nextChunk.ChunkLength - 22);
                     }
                     else br.ReadBytes((int)nextChunk.ChunkLength - 18);
@@ -113,7 +117,7 @@ namespace NAudio.Wave
                     br.BaseStream.Position += nextChunk.ChunkLength;
                 }
 
-                
+
             }
 
             if (format == null)
@@ -223,39 +227,52 @@ namespace NAudio.Wave
                 // sometimes there is more junk at the end of the file past the data chunk
                 if (Position + count > dataChunkLength)
                 {
-                    count = dataChunkLength - (int) Position;
+                    count = dataChunkLength - (int)Position;
                 }
 
                 // Need to fix the endianness since intel expect little endian, and apple is big endian.
                 byte[] buffer = new byte[count];
                 int length = waveStream.Read(buffer, offset, count);
 
-                int bytesPerSample = WaveFormat.BitsPerSample/8;
+                int bytesPerSample = WaveFormat.BitsPerSample / 8;
                 for (int i = 0; i < length; i += bytesPerSample)
                 {
-                    if (WaveFormat.BitsPerSample == 8)
+                    if (this.pcmLittleEndian)
                     {
-                        array[i] = buffer[i];
+                        int l = 1;
+                        if (WaveFormat.BitsPerSample == 8) { l = 1; }
+                        else if (WaveFormat.BitsPerSample == 16) { l = 2; }
+                        else if (WaveFormat.BitsPerSample == 24) { l = 3; }
+                        else if (WaveFormat.BitsPerSample == 32) { l = 4; }
+                        else throw new FormatException("Unsupported PCM format.");
+                        Array.Copy(buffer, i, array, i, l);
                     }
-                    else if (WaveFormat.BitsPerSample == 16)
+                    else
                     {
-                        array[i + 0] = buffer[i + 1];
-                        array[i + 1] = buffer[i];
+                        if (WaveFormat.BitsPerSample == 8)
+                        {
+                            array[i] = buffer[i];
+                        }
+                        else if (WaveFormat.BitsPerSample == 16)
+                        {
+                            array[i + 0] = buffer[i + 1];
+                            array[i + 1] = buffer[i];
+                        }
+                        else if (WaveFormat.BitsPerSample == 24)
+                        {
+                            array[i + 0] = buffer[i + 2];
+                            array[i + 1] = buffer[i + 1];
+                            array[i + 2] = buffer[i + 0];
+                        }
+                        else if (WaveFormat.BitsPerSample == 32)
+                        {
+                            array[i + 0] = buffer[i + 3];
+                            array[i + 1] = buffer[i + 2];
+                            array[i + 2] = buffer[i + 1];
+                            array[i + 3] = buffer[i + 0];
+                        }
+                        else throw new FormatException("Unsupported PCM format.");
                     }
-                    else if (WaveFormat.BitsPerSample == 24)
-                    {
-                        array[i + 0] = buffer[i + 2];
-                        array[i + 1] = buffer[i + 1];
-                        array[i + 2] = buffer[i + 0];
-                    }
-                    else if (WaveFormat.BitsPerSample == 32)
-                    {
-                        array[i + 0] = buffer[i + 3];
-                        array[i + 1] = buffer[i + 2];
-                        array[i + 2] = buffer[i + 1];
-                        array[i + 3] = buffer[i + 0];
-                    }
-                    else throw new FormatException("Unsupported PCM format.");
                 }
 
                 return length;
